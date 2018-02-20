@@ -20,6 +20,7 @@ With no parameters, the configuration file is read from 'dns_proxy.conf'.
 
 The configuration file should contain any of the following options (and ignores lines that begin with '#'):
 
+* dns_mode    -- choose dns mode (0=tcp or 1=socks)
 * socks_addr  -- socks listener address
 * socks_port  -- socks listener port
 * listen_addr -- address for the dns proxy to listen on
@@ -31,14 +32,15 @@ The configuration file should contain any of the following options (and ignores 
 
 Any non-specified options will be set to their defaults:
 
-* socks_addr  = 127.0.0.1
-* socks_port  = 9050
-* listen_addr = 0.0.0.0
-* listen_port = 53
-* set_user    = nobody
-* set_group   = nobody
-* resolv_conf = resolv.conf
-* log_file    = /dev/null
+* dns_mode      = 0
+* socks_addr    = 127.0.0.1
+* socks_port    = 9050
+* listen_addr   = 0.0.0.0
+* listen_port   = 53
+* set_user      = nobody
+* set_group     = nobody
+* resolv_conf   = resolv.conf
+* log_file      = /dev/null
 
 ## Installation
 
