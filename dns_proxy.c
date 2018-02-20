@@ -17,6 +17,7 @@
  *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
@@ -34,6 +35,78 @@
 #include <time.h>
 #include <errno.h>
 
+#ifdef UNUSED
+#elif defined(__GNUC__)
+# define UNUSED(x) UNUSED_ ## x __attribute__((unused))
+#elif defined(__LCLINT__)
+# define UNUSED(x) /*@unused@*/ x
+#else
+# define UNUSED(x) x
+#endif
+
+struct DNS_HEADER
+{
+    unsigned short id; // identification number
+
+    unsigned char rd :1; // recursion desired
+    unsigned char tc :1; // truncated message
+    unsigned char aa :1; // authoritive answer
+    unsigned char opcode :4; // purpose of message
+    unsigned char qr :1; // query/response flag
+
+    unsigned char rcode :4; // response code
+    unsigned char cd :1; // checking disabled
+    unsigned char ad :1; // authenticated data
+    unsigned char z :1; // its z! reserved
+    unsigned char ra :1; // recursion available
+
+    unsigned short q_count; // number of question entries
+    unsigned short ans_count; // number of answer entries
+    unsigned short auth_count; // number of authority entries
+    unsigned short add_count; // number of resource entries
+};
+
+// Constant sized fields of query structure
+struct QUESTION
+{
+    unsigned short qtype;
+    unsigned short qclass;
+};
+
+// Constant sized fields of the resource record structure
+struct ANSWER
+{
+    unsigned short type;
+    unsigned short _class;
+    unsigned int ttl;
+    unsigned short data_len;
+};
+
+// Pointers to resource record contents
+struct RES_RECORD
+{
+    unsigned char *name;
+    struct R_DATA *resource;
+    unsigned char *rdata;
+};
+
+// Structure of a Query
+struct QUERY
+{
+    unsigned char *name;
+    struct QUESTION *ques;
+};
+
+
+// Types of DNS resource records
+#define T_A 1 //Ipv4 address
+#define T_NS 2 //Nameserver
+#define T_CNAME 5 //canonical name
+#define T_SOA 6 //start of authority zone
+#define T_PTR 12 //domain name pointer
+#define T_MX 15 //Mail server
+
+int   DNS_MODE = 0;
 int   SOCKS_PORT  = 9050;
 char *SOCKS_ADDR  = { "127.0.0.1" };
 int   LISTEN_PORT = 53;
@@ -90,6 +163,10 @@ void parse_config(char *file) {
     if (line[0] == '#')
       continue;
 
+    if(strstr(line, "dns_mode") != NULL) {
+      DNS_MODE = strtol(get_value(line), NULL, 10);
+      printf("DNS_MODE = %d\n", DNS_MODE);
+    }
     if(strstr(line, "socks_port") != NULL) 
       SOCKS_PORT = strtol(get_value(line), NULL, 10);
     else if(strstr(line, "socks_addr") != NULL)
@@ -144,12 +221,46 @@ void parse_resolv_conf() {
     error("[!] Error closing resolv.conf");
 }
 
+
+
 // handle children
-void reaper_handle (int sig) {
+void reaper_handle (int UNUSED(sig)) {
   while (waitpid(-1, NULL, WNOHANG) > 0) { };
 }
 
+
+void local_dns() {
+  
+}
+
+
 void tcp_query(void *query, response *buffer, int len) {
+  int sock;
+  struct sockaddr_in tcp_dns_server;
+  //char tmp[1024];
+
+  srand(time(NULL));
+  int idx = rand() % NUM_DNS;
+  in_addr_t remote_dns = inet_addr(dns_servers[idx]);
+  memset(&tcp_dns_server, 0, sizeof(tcp_dns_server));
+  tcp_dns_server.sin_family = AF_INET;
+  tcp_dns_server.sin_port = htons(53);
+  tcp_dns_server.sin_addr.s_addr = remote_dns;
+
+  sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) 
+    error("[!] Error creating TCP socket");
+
+
+  if (connect(sock, (struct sockaddr*)&tcp_dns_server, sizeof(tcp_dns_server)) < 0)
+    error("[!] Error connecting to proxy");
+  // forward dns query
+  send(sock, query, len, 0);
+  buffer->length = recv(sock, buffer->buffer, 2048, 0);
+
+}
+
+void tcp_socks_query(void *query, response *buffer, int len) {
   int sock;
   struct sockaddr_in socks_server;
   char tmp[1024];
@@ -173,7 +284,8 @@ void tcp_query(void *query, response *buffer, int len) {
   srand(time(NULL));
 
   // select random dns server
-  in_addr_t remote_dns = inet_addr(dns_servers[rand() % (NUM_DNS - 1)]);
+  int idx = rand() % NUM_DNS;
+  in_addr_t remote_dns = inet_addr(dns_servers[idx]);
   memcpy(tmp, "\x05\x01\x00\x01", 4);
   memcpy(tmp + 4, &remote_dns, 4);
   memcpy(tmp + 8, "\x00\x35", 2);
@@ -263,7 +375,10 @@ int udp_listener() {
     memcpy(query + 2, buffer->buffer, len);
 
     // forward the packet to the tcp dns server
-    tcp_query(query, buffer, len + 2);
+    if (DNS_MODE)
+      tcp_socks_query(query, buffer, len + 2);
+    else
+      tcp_query(query, buffer, len + 2);
 
     // send the reply back to the client (minus the length at the beginning)
     sendto(sock, buffer->buffer + 2, buffer->length - 2, 0, (struct sockaddr *)&dns_client, sizeof(dns_client));
@@ -287,6 +402,7 @@ int main(int argc, char *argv[]) {
       printf(" -h          -- Print this message and exit.\n");
       printf(" config_file -- Read from specified configuration file.\n\n");
       printf(" * The configuration file should contain any of the following options (and ignores lines that begin with '#'):\n");
+      printf("   * dns_mode  -- choose dns mode (0=tcp or 1=socks)\n");
       printf("   * socks_addr  -- socks listener address\n");
       printf("   * socks_port  -- socks listener port\n");
       printf("   * listen_addr -- address for the dns proxy to listen on\n");
@@ -298,6 +414,7 @@ int main(int argc, char *argv[]) {
       printf(" * Configuration directives should be of the format:\n");
       printf("   option = value\n\n");
       printf(" * Any non-specified options will be set to their defaults:\n");
+      printf("   * dns_mode   = 0\n");
       printf("   * socks_addr   = 127.0.0.1\n");
       printf("   * socks_port   = 9050\n");
       printf("   * listen_addr  = 0.0.0.0\n");
@@ -319,6 +436,7 @@ int main(int argc, char *argv[]) {
   }
 
   printf("[*] Listening on: %s:%d\n", LISTEN_ADDR, LISTEN_PORT);
+  printf("[*] DNS Mode: %s\n",  DNS_MODE==0? "TCP":"SOCKS");
   printf("[*] Using SOCKS proxy: %s:%d\n", SOCKS_ADDR, SOCKS_PORT);
   printf("[*] Will drop priviledges to %s:%s\n", USERNAME, GROUPNAME);
   parse_resolv_conf();
